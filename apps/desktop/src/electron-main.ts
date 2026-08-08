@@ -388,7 +388,14 @@ app.on("ready", async () => {
     rendererRecovery = setupRendererRecovery(global.mainWindow);
 
     session.defaultSession.setDisplayMediaRequestHandler(
-        (_, callback) => {
+        (request, callback) => {
+            const grantLoopbackAudio = process.platform === "win32" && request.audioRequested;
+            console.info("Display media request received", {
+                audioRequested: request.audioRequested,
+                videoRequested: request.videoRequested,
+                loopbackAudioWillBeGranted: grantLoopbackAudio,
+            });
+
             if (process.env.XDG_SESSION_TYPE === "wayland") {
                 // On Wayland, calling getSources() opens the xdg-desktop-portal picker.
                 // The user can only select a single source there, so Electron will return an array with exactly one entry.
@@ -407,7 +414,12 @@ app.on("ready", async () => {
             } else {
                 global.mainWindow?.webContents.send("openDesktopCapturerSourcePicker");
             }
-            setDisplayMediaCallback(callback);
+            setDisplayMediaCallback((streams) => {
+                console.info("Completing display media request", {
+                    loopbackAudioGranted: grantLoopbackAudio,
+                });
+                callback(grantLoopbackAudio ? { ...streams, audio: "loopback" } : streams);
+            });
         },
         { useSystemPicker: true },
     ); // Use Mac OS 15+ native picker

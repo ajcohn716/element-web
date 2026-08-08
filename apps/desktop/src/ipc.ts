@@ -5,7 +5,16 @@ SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only OR LicenseRef-Element-Com
 Please see LICENSE files in the repository root for full details.
 */
 
-import { app, autoUpdater, desktopCapturer, ipcMain, powerSaveBlocker, TouchBar, nativeImage } from "electron";
+import {
+    app,
+    autoUpdater,
+    desktopCapturer,
+    ipcMain,
+    powerSaveBlocker,
+    TouchBar,
+    nativeImage,
+    type Video,
+} from "electron";
 
 import IpcMainEvent = Electron.IpcMainEvent;
 import { randomArray } from "./utils.js";
@@ -143,11 +152,17 @@ ipcMain.on("ipcCall", async function (_ev: IpcMainEvent, payload) {
                 thumbnailURL: source.thumbnail.toDataURL(),
             }));
             break;
-        case "callDisplayMediaCallback":
-            getDisplayMediaCallback()?.({ video: args[0] });
+        case "callDisplayMediaCallback": {
+            const selectedSource: Video = args[0];
+            console.info("Display media source selected", {
+                sourceId: selectedSource.id,
+                sourceType: selectedSource.id.split(":", 1)[0] || "unknown",
+            });
+            getDisplayMediaCallback()?.({ video: selectedSource });
             setDisplayMediaCallback(null);
             ret = null;
             break;
+        }
 
         case "clearStorage":
             await clearDataAndRelaunch(global.mainWindow.webContents.session);
