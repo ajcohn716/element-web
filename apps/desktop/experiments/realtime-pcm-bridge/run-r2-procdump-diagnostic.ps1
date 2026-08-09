@@ -552,10 +552,10 @@ for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         }
     }
     if ($dumpCaptured) {
-        Write-Error "R2 known freeze captured; diagnostic run intentionally exits nonzero and stops reproduction" -ErrorAction Continue
+        Write-Output "R2_PROCDUMP_STATUS result=frozen-dump unresolved=true"
         exit 3
     }
 }
 
-Write-Error "No freeze was captured in $MaximumAttempts isolated attempt(s); this is not resolution" -ErrorAction Continue
+Write-Output "R2_PROCDUMP_STATUS result=no-freeze attempts=$MaximumAttempts unresolved=true"
 exit 2
