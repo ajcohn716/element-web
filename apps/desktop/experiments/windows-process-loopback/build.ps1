@@ -19,10 +19,9 @@ $outputDir = Join-Path $experimentDir "bin"
 $outputPath = Join-Path $outputDir "windows-process-loopback.exe"
 
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-& $compiler /nologo /optimize+ /platform:x64 "/out:$outputPath" (Join-Path $experimentDir "Program.cs")
+& $compiler /nologo /optimize+ /platform:x64 /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/out:$outputPath" (Join-Path $experimentDir "Program.cs")
 if ($LASTEXITCODE -ne 0) {
     throw "C# compilation failed with exit code $LASTEXITCODE"
 }
 
 Write-Output $outputPath
-

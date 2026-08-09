@@ -53,6 +53,61 @@ async function analyze(track) {
     return { sampleRate: analysisContext.sampleRate, rms, tone733, tone997, separationDb };
 }
 
+async function analyzeChannels(track) {
+    const context = new AudioContext({ sampleRate: 48_000 });
+    const source = context.createMediaStreamSource(new MediaStream([track]));
+    const splitter = context.createChannelSplitter(2);
+    const left = context.createAnalyser();
+    const right = context.createAnalyser();
+    left.fftSize = 32768;
+    right.fftSize = 32768;
+    source.connect(splitter);
+    splitter.connect(left, 0);
+    splitter.connect(right, 1);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const leftSamples = new Float32Array(left.fftSize);
+    const rightSamples = new Float32Array(right.fftSize);
+    left.getFloatTimeDomainData(leftSamples);
+    right.getFloatTimeDomainData(rightSamples);
+    const metrics = (samples) => ({
+        rms: Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length),
+        tone733: magnitude(samples, context.sampleRate, 733),
+        tone997: magnitude(samples, context.sampleRate, 997),
+    });
+    const value = { sampleRate: context.sampleRate, left: metrics(leftSamples), right: metrics(rightSamples) };
+    await context.close();
+    return value;
+}
+
+async function fidelityCase(name, audioConstraints, applyConstraints) {
+    latestBridgeDetails = undefined;
+    const fidelityStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: audioConstraints });
+    const track = fidelityStream.getAudioTracks()[0];
+    const before = {
+        settings: track.getSettings(),
+        constraints: track.getConstraints(),
+        capabilities: track.getCapabilities(),
+    };
+    let application;
+    if (applyConstraints) {
+        try {
+            await track.applyConstraints(applyConstraints);
+            application = { ok: true };
+        } catch (error) {
+            application = { ok: false, error: `${error.name}: ${error.message}` };
+        }
+    }
+    const after = {
+        settings: track.getSettings(),
+        constraints: track.getConstraints(),
+        capabilities: track.getCapabilities(),
+    };
+    const channels = await analyzeChannels(track);
+    fidelityStream.getTracks().forEach((item) => item.stop());
+    await window.diagnostics.stopSession();
+    return { name, bridge: latestBridgeDetails, before, application, after, channels };
+}
+
 async function start() {
     if (stream) return;
     result.textContent = "Requesting display media...";
@@ -126,6 +181,65 @@ window.diagnostics.onBridgeReady((value) => {
     latestBridgeDetails = value;
 });
 window.runtimeTest = {
+    async runFidelity() {
+        const current = { autoGainControl: false, noiseSuppression: false, voiceIsolation: false };
+        const cases = [];
+        cases.push(await fidelityCase("current Element Call constraints", current));
+        cases.push(await fidelityCase("initial channelCount ideal 2", { ...current, channelCount: { ideal: 2 } }));
+        let exactStereo;
+        try {
+            exactStereo = await fidelityCase("initial channelCount exact 2", {
+                ...current,
+                channelCount: { exact: 2 },
+            });
+        } catch (error) {
+            await window.diagnostics.stopSession();
+            exactStereo = { name: "initial channelCount exact 2", captureError: `${error.name}: ${error.message}` };
+        }
+        cases.push(exactStereo);
+        cases.push(await fidelityCase("initial echoCancellation false", { ...current, echoCancellation: false }));
+        cases.push(await fidelityCase("apply echoCancellation false", current, { echoCancellation: false }));
+        cases.push(
+            await fidelityCase("combined stereo and echoCancellation false", {
+                ...current,
+                channelCount: { ideal: 2 },
+                echoCancellation: false,
+            }),
+        );
+        const [baseline, idealStereo, rejectedExactStereo, initialAecOff, appliedAecOff, combined] = cases;
+        const mixed = (item) =>
+            item.channels.left.tone733 > 0.02 &&
+            item.channels.left.tone997 > 0.02 &&
+            Math.abs(item.channels.left.rms - item.channels.right.rms) < 0.01 &&
+            Math.abs(item.channels.left.tone733 - item.channels.right.tone733) < 0.01 &&
+            Math.abs(item.channels.left.tone997 - item.channels.right.tone997) < 0.01;
+        const separated = (item) =>
+            item.channels.left.rms > 0.05 &&
+            item.channels.right.rms > 0.05 &&
+            item.channels.left.tone733 / Math.max(item.channels.left.tone997, 1e-6) >= 10 &&
+            item.channels.right.tone997 / Math.max(item.channels.right.tone733, 1e-6) >= 10;
+        assert(baseline.before.settings.channelCount === 1, "baseline reports mono");
+        assert(baseline.before.settings.echoCancellation === true, "baseline reports AEC enabled");
+        assert(mixed(baseline), "baseline destructively mixes distinct source channels");
+        assert(idealStereo.before.settings.channelCount === 2, "ideal stereo reports two channels");
+        assert(idealStereo.before.settings.echoCancellation === true, "ideal stereo leaves AEC enabled");
+        assert(mixed(idealStereo), "ideal stereo remains mixed while AEC is enabled");
+        assert(rejectedExactStereo.captureError?.startsWith("TypeError:"), "exact stereo is rejected");
+        assert(initialAecOff.before.settings.echoCancellation === false, "initial AEC false is reflected");
+        assert(initialAecOff.before.settings.channelCount === 2, "initial AEC false reports stereo");
+        assert(separated(initialAecOff), "initial AEC false preserves distinct stereo");
+        assert(appliedAecOff.application?.ok === false, "post-grant AEC false is rejected");
+        assert(appliedAecOff.application.error.startsWith("OverconstrainedError:"), "post-grant AEC error type");
+        assert(appliedAecOff.after.settings.echoCancellation === true, "rejected AEC application leaves AEC enabled");
+        assert(appliedAecOff.after.settings.channelCount === 1, "rejected AEC application leaves mono setting");
+        assert(mixed(appliedAecOff), "rejected AEC application leaves mixed audio");
+        assert(combined.before.settings.echoCancellation === false, "combined constraints disable AEC initially");
+        assert(combined.before.settings.channelCount === 2, "combined constraints report stereo");
+        assert(separated(combined), "combined constraints preserve distinct stereo");
+        const diagnostics = await window.diagnostics.sessionDiagnostics();
+        assert(!diagnostics.activeSession && diagnostics.bridgeWindows === 0, "fidelity teardown");
+        return { cases, diagnostics };
+    },
     async run(soakMilliseconds) {
         const cycles = [];
         for (let cycle = 1; cycle <= 10; cycle += 1) {

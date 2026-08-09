@@ -12,6 +12,7 @@ using System.Media;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Windows.Forms;
 
 public static class Program
 {
@@ -30,6 +31,10 @@ public static class Program
     private static readonly Guid AudioClientInterfaceId = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
     private static readonly Guid AudioCaptureClientInterfaceId = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
     private static volatile bool stopRequested;
+
+    private const uint StreamMagic = 0x414D4350; // "PCMA" in little endian.
+    private const ushort StreamVersion = 1;
+    private const uint StreamHeaderBytes = 48;
 
     private static int Main(string[] args)
     {
@@ -51,6 +56,25 @@ public static class Program
         if (args.Length == 4 && string.Equals(args[0], "tone-tree", StringComparison.OrdinalIgnoreCase))
         {
             return PlayToneFromChild(args[1], args[2], args[3]);
+        }
+
+        if (args.Length == 2 && string.Equals(args[0], "stereo-window-tone", StringComparison.OrdinalIgnoreCase))
+        {
+            return PlayStereoWindowTone(args[1]);
+        }
+
+        if (args.Length == 3 && string.Equals(args[0], "stream", StringComparison.OrdinalIgnoreCase))
+        {
+            uint processId;
+            if (!uint.TryParse(args[1], out processId) || processId == 0)
+            {
+                return Fail("PID must be a positive decimal integer.");
+            }
+            bool include;
+            if (string.Equals(args[2], "include", StringComparison.OrdinalIgnoreCase)) include = true;
+            else if (string.Equals(args[2], "exclude", StringComparison.OrdinalIgnoreCase)) include = false;
+            else return Fail("Capture mode must be 'include' or 'exclude'.");
+            return Capture(processId, include, null, 0);
         }
 
         if (args.Length >= 4 && args.Length <= 5 &&
@@ -131,15 +155,20 @@ public static class Program
             return Fail("Target PID is not running: " + error.Message);
         }
 
-        string fullOutputPath = Path.GetFullPath(outputPath);
-        string outputDirectory = Path.GetDirectoryName(fullOutputPath);
-        if (!string.IsNullOrEmpty(outputDirectory))
+        bool streaming = outputPath == null;
+        string fullOutputPath = streaming ? null : Path.GetFullPath(outputPath);
+        string outputDirectory = streaming ? null : Path.GetDirectoryName(fullOutputPath);
+        if (!streaming && !string.IsNullOrEmpty(outputDirectory))
         {
             Directory.CreateDirectory(outputDirectory);
         }
 
         int initializeResult = CoInitializeEx(IntPtr.Zero, 0);
-        if (initializeResult < 0 && initializeResult != unchecked((int)0x80010106))
+        if (initializeResult == unchecked((int)0x80010106))
+        {
+            return Fail("Process-loopback capture requires an MTA thread; CoInitializeEx returned RPC_E_CHANGED_MODE.");
+        }
+        if (initializeResult < 0)
         {
             return FailHResult("CoInitializeEx", initializeResult);
         }
@@ -149,7 +178,9 @@ public static class Program
         {
             using (AutoResetEvent samplesReady = new AutoResetEvent(false))
             using (ManualResetEvent activationCompleted = new ManualResetEvent(false))
-            using (FileStream output = new FileStream(fullOutputPath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read))
+            using (Stream output = streaming
+                ? Console.OpenStandardOutput()
+                : (Stream)new FileStream(fullOutputPath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read))
             using (BinaryWriter writer = new BinaryWriter(output, Encoding.ASCII))
             {
                 CompletionHandler completionHandler = new CompletionHandler(activationCompleted);
@@ -249,27 +280,42 @@ public static class Program
                     CheckHResult("IAudioClient.GetService", audioClient.GetService(ref captureInterfaceId, out captureClientObject));
                     captureClient = (IAudioCaptureClient)captureClientObject;
 
-                    WriteWaveHeader(writer, captureFormat, 0);
+                    if (streaming) WriteStreamStart(writer, processId, include, captureFormat);
+                    else WriteWaveHeader(writer, captureFormat, 0);
                     CheckHResult("IAudioClient.Start", audioClient.Start());
 
                     stopRequested = false;
                     Console.CancelKeyPress += OnCancelKeyPress;
-                    Console.WriteLine("pid={0}", processId);
-                    Console.WriteLine("executable={0}", GetExecutableBasename(processId) ?? "unavailable");
-                    Console.WriteLine("mode={0}", include ? "include-target-process-tree" : "exclude-target-process-tree");
-                    Console.WriteLine("wasapiMixFormat={0}", wasapiMixFormat);
-                    Console.WriteLine("format=48000Hz stereo PCM16");
-                    Console.WriteLine("output={0}", fullOutputPath);
+                    TextWriter diagnostics = streaming ? Console.Error : Console.Out;
+                    diagnostics.WriteLine("pid={0}", processId);
+                    diagnostics.WriteLine("executable={0}", GetExecutableBasename(processId) ?? "unavailable");
+                    diagnostics.WriteLine("mode={0}", include ? "include-target-process-tree" : "exclude-target-process-tree");
+                    diagnostics.WriteLine("wasapiMixFormat={0}", wasapiMixFormat);
+                    diagnostics.WriteLine("format=48000Hz stereo PCM16");
+                    if (!streaming) diagnostics.WriteLine("output={0}", fullOutputPath);
+
+                    Thread inputMonitor = null;
+                    if (streaming)
+                    {
+                        inputMonitor = new Thread(MonitorStreamControl);
+                        inputMonitor.IsBackground = true;
+                        inputMonitor.Name = "process-loopback-control";
+                        inputMonitor.Start();
+                    }
 
                     long dataBytes = 0;
                     long sampleCount = 0;
                     double sampleSquareSum = 0;
                     int peakSample = 0;
                     int discontinuities = 0;
+                    ulong sequence = 0;
+                    ulong startFrame = 0;
+                    bool outputClosed = false;
                     Stopwatch elapsed = Stopwatch.StartNew();
-                    string stopReason = "duration elapsed";
+                    string stopReason = streaming ? "stop requested" : "duration elapsed";
 
-                    while (!stopRequested && elapsed.Elapsed < TimeSpan.FromSeconds(durationSeconds))
+                    while (!stopRequested && !outputClosed &&
+                        (streaming || elapsed.Elapsed < TimeSpan.FromSeconds(durationSeconds)))
                     {
                         try
                         {
@@ -294,7 +340,11 @@ public static class Program
                             ref sampleCount,
                             ref sampleSquareSum,
                             ref peakSample,
-                            ref discontinuities);
+                            ref discontinuities,
+                            streaming,
+                            ref sequence,
+                            ref startFrame,
+                            ref outputClosed);
                     }
 
                     if (stopRequested)
@@ -308,27 +358,38 @@ public static class Program
                         Console.Error.WriteLine("warning=IAudioClient.Stop failed with 0x{0:X8}", stopResult);
                     }
 
-                    DrainPackets(
-                        captureClient,
-                        writer,
-                        captureFormat.BlockAlign,
-                        ref dataBytes,
-                        ref sampleCount,
-                        ref sampleSquareSum,
-                        ref peakSample,
-                        ref discontinuities);
-                    PatchWaveHeader(writer, checked((uint)dataBytes));
-                    writer.Flush();
+                    if (!outputClosed)
+                    {
+                        DrainPackets(
+                            captureClient,
+                            writer,
+                            captureFormat.BlockAlign,
+                            ref dataBytes,
+                            ref sampleCount,
+                            ref sampleSquareSum,
+                            ref peakSample,
+                            ref discontinuities,
+                            streaming,
+                            ref sequence,
+                            ref startFrame,
+                            ref outputClosed);
+                    }
+                    if (!outputClosed)
+                    {
+                        if (streaming) WriteStreamEnd(writer, sequence, startFrame, discontinuities, stopReason, dataBytes);
+                        else PatchWaveHeader(writer, checked((uint)dataBytes));
+                        writer.Flush();
+                    }
 
                     double normalizedRms = sampleCount == 0 ? 0 : Math.Sqrt(sampleSquareSum / sampleCount) / 32768.0;
                     double normalizedPeak = peakSample / 32768.0;
 
-                    Console.WriteLine("stopReason={0}", stopReason);
-                    Console.WriteLine("capturedBytes={0}", dataBytes);
-                    Console.WriteLine("normalizedRms={0:F8}", normalizedRms);
-                    Console.WriteLine("normalizedPeak={0:F8}", normalizedPeak);
-                    Console.WriteLine("dataDiscontinuities={0}", discontinuities);
-                    Console.WriteLine("silenceOnly={0}", normalizedRms < 0.0001 ? "true" : "false");
+                    diagnostics.WriteLine("stopReason={0}", outputClosed ? "consumer pipe closed" : stopReason);
+                    diagnostics.WriteLine("capturedBytes={0}", dataBytes);
+                    diagnostics.WriteLine("normalizedRms={0:F8}", normalizedRms);
+                    diagnostics.WriteLine("normalizedPeak={0:F8}", normalizedPeak);
+                    diagnostics.WriteLine("dataDiscontinuities={0}", discontinuities);
+                    diagnostics.WriteLine("silenceOnly={0}", normalizedRms < 0.0001 ? "true" : "false");
                     return 0;
                 }
                 catch (COMException error)
@@ -428,6 +489,103 @@ public static class Program
         }
     }
 
+    private static int PlayStereoWindowTone(string durationArgument)
+    {
+        int durationSeconds;
+        if (!int.TryParse(durationArgument, out durationSeconds) || durationSeconds <= 0)
+        {
+            return Fail("Stereo window tone duration must be a positive number of seconds.");
+        }
+
+        Exception uiFailure = null;
+        Form activeWindow = null;
+        Thread uiThread = new Thread(new ThreadStart(delegate
+        {
+            try
+            {
+                const int sampleRate = 48000;
+                const int frameCount = sampleRate * 2;
+                using (MemoryStream wave = new MemoryStream(44 + frameCount * 4))
+                using (BinaryWriter writer = new BinaryWriter(wave, Encoding.ASCII, true))
+                {
+                    WriteWaveHeader(writer, WaveFormat.CreatePcm(sampleRate, 2, 16), checked((uint)(frameCount * 4)));
+                    for (int frame = 0; frame < frameCount; frame++)
+                    {
+                        writer.Write((short)(Math.Sin(2.0 * Math.PI * 733 * frame / sampleRate) * short.MaxValue * 0.2));
+                        writer.Write((short)(Math.Sin(2.0 * Math.PI * 997 * frame / sampleRate) * short.MaxValue * 0.2));
+                    }
+                    writer.Flush();
+                    wave.Position = 0;
+                    using (SoundPlayer player = new SoundPlayer(wave))
+                    using (Form window = new Form())
+                    using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer())
+                    {
+                        activeWindow = window;
+                        window.Text = "Process loopback stereo test source";
+                        window.Width = 520;
+                        window.Height = 180;
+                        Label instructions = new Label();
+                        instructions.Dock = DockStyle.Fill;
+                        instructions.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
+                        instructions.Text = "Stereo process-loopback target\r\nLeft: 733 Hz    Right: 997 Hz";
+                        window.Controls.Add(instructions);
+                        timer.Interval = checked(durationSeconds * 1000);
+                        timer.Tick += delegate { window.Close(); };
+                        window.Shown += delegate
+                        {
+                            Console.WriteLine("pid={0}", Process.GetCurrentProcess().Id);
+                            player.PlayLooping();
+                            timer.Start();
+                        };
+                        window.FormClosed += delegate { player.Stop(); };
+                        Application.Run(window);
+                        activeWindow = null;
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                uiFailure = error;
+            }
+        }));
+        uiThread.IsBackground = true;
+        uiThread.Name = "stereo-window-tone-ui";
+        uiThread.SetApartmentState(ApartmentState.STA);
+        uiThread.Start();
+        if (!uiThread.Join(TimeSpan.FromSeconds(durationSeconds + 10)))
+        {
+            Form window = activeWindow;
+            if (window != null && !window.IsDisposed)
+            {
+                try { window.BeginInvoke((MethodInvoker)delegate { window.Close(); }); }
+                catch { }
+            }
+            uiThread.Join(TimeSpan.FromSeconds(2));
+            return Fail("Stereo window tone UI thread did not exit within its bounded deadline.");
+        }
+        if (uiFailure != null)
+        {
+            return Fail("Stereo window tone UI failed: " + uiFailure.Message);
+        }
+        return 0;
+    }
+
+    private static void MonitorStreamControl()
+    {
+        try
+        {
+            string command;
+            while ((command = Console.In.ReadLine()) != null)
+            {
+                if (string.Equals(command.Trim(), "STOP", StringComparison.OrdinalIgnoreCase)) break;
+            }
+        }
+        catch (IOException)
+        {
+        }
+        stopRequested = true;
+    }
+
     private static void DrainPackets(
         IAudioCaptureClient captureClient,
         BinaryWriter writer,
@@ -436,7 +594,11 @@ public static class Program
         ref long sampleCount,
         ref double sampleSquareSum,
         ref int peakSample,
-        ref int discontinuities)
+        ref int discontinuities,
+        bool streaming,
+        ref ulong sequence,
+        ref ulong startFrame,
+        ref bool outputClosed)
     {
         uint nextPacketFrames;
         CheckHResult("IAudioCaptureClient.GetNextPacketSize", captureClient.GetNextPacketSize(out nextPacketFrames));
@@ -477,7 +639,26 @@ public static class Program
                 {
                     discontinuities++;
                 }
-                writer.Write(bytes);
+                try
+                {
+                    if (streaming)
+                    {
+                        WriteStreamHeader(writer, 2, (uint)bytes.Length, sequence, startFrame, flags, 0, frames);
+                        writer.Write(bytes);
+                        writer.Flush();
+                        sequence++;
+                        startFrame += frames;
+                    }
+                    else
+                    {
+                        writer.Write(bytes);
+                    }
+                }
+                catch (IOException)
+                {
+                    outputClosed = true;
+                    stopRequested = true;
+                }
                 dataBytes += byteCount;
             }
             finally
@@ -487,6 +668,52 @@ public static class Program
 
             CheckHResult("IAudioCaptureClient.GetNextPacketSize", captureClient.GetNextPacketSize(out nextPacketFrames));
         }
+    }
+
+    private static void WriteStreamStart(BinaryWriter writer, uint processId, bool include, WaveFormat format)
+    {
+        WriteStreamHeader(writer, 1, 16, 0, 0, include ? 1u : 2u, 0, processId);
+        writer.Write(format.SamplesPerSecond);
+        writer.Write(format.Channels);
+        writer.Write(format.BitsPerSample);
+        writer.Write(format.BlockAlign);
+        writer.Write((ushort)0);
+        writer.Write(format.AverageBytesPerSecond);
+        writer.Flush();
+    }
+
+    private static void WriteStreamEnd(
+        BinaryWriter writer,
+        ulong sequence,
+        ulong startFrame,
+        int discontinuities,
+        string reason,
+        long capturedBytes)
+    {
+        uint reasonCode = reason.IndexOf("target process", StringComparison.OrdinalIgnoreCase) >= 0 ? 2u : 1u;
+        WriteStreamHeader(writer, 3, 0, sequence, startFrame, (uint)discontinuities, reasonCode, (ulong)capturedBytes);
+    }
+
+    private static void WriteStreamHeader(
+        BinaryWriter writer,
+        ushort type,
+        uint payloadBytes,
+        ulong sequence,
+        ulong startFrame,
+        uint flags,
+        uint reason,
+        ulong counter)
+    {
+        writer.Write(StreamMagic);
+        writer.Write(StreamVersion);
+        writer.Write(type);
+        writer.Write(StreamHeaderBytes);
+        writer.Write(payloadBytes);
+        writer.Write(sequence);
+        writer.Write(startFrame);
+        writer.Write(flags);
+        writer.Write(reason);
+        writer.Write(counter);
     }
 
     private static void WriteWaveHeader(BinaryWriter writer, WaveFormat format, uint dataBytes)
@@ -612,8 +839,10 @@ public static class Program
         Console.Error.WriteLine("Usage:");
         Console.Error.WriteLine("  windows-process-loopback source <window-source-id>");
         Console.Error.WriteLine("  windows-process-loopback capture <pid> <include|exclude> <output.wav> [seconds]");
+        Console.Error.WriteLine("  windows-process-loopback stream <pid> <include|exclude>");
         Console.Error.WriteLine("  windows-process-loopback tone <frequency-hz> <seconds>");
         Console.Error.WriteLine("  windows-process-loopback tone-tree <frequency-hz> <delay-seconds> <seconds>");
+        Console.Error.WriteLine("  windows-process-loopback stereo-window-tone <seconds>");
     }
 
     [StructLayout(LayoutKind.Sequential)]
