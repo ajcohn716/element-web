@@ -21,6 +21,11 @@ class PcmBridgeProcessor extends AudioWorkletProcessor {
         this.discontinuities = 0;
         this.lastReportFrame = 0;
         this.port.onmessage = (event) => {
+            if (event.data?.type === "r2-close-input-port") {
+                this.inputPort?.close();
+                this.inputPort = null;
+                return;
+            }
             if (event.data?.type !== "attach-port" || event.ports.length !== 1 || this.inputPort) return;
             this.inputPort = event.ports[0];
             this.inputPort.onmessage = (packetEvent) => this.receivePacket(packetEvent.data);

@@ -7,9 +7,11 @@ Please see LICENSE files in the repository root for full details.
 
 const { contextBridge, ipcRenderer } = require("electron");
 
-ipcRenderer.on("pcm-port", (event, sessionId) => {
+ipcRenderer.on("pcm-port", (event, sessionDetails) => {
     if (event.ports.length !== 1) return;
-    window.postMessage({ type: "pcm-bridge-port", sessionId }, "*", event.ports);
+    const details =
+        typeof sessionDetails === "object" && sessionDetails !== null ? sessionDetails : { sessionId: sessionDetails };
+    window.postMessage({ type: "pcm-bridge-port", ...details }, "*", event.ports);
 });
 
 contextBridge.exposeInMainWorld("bridgeHost", {

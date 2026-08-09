@@ -46,3 +46,11 @@ test("drops the oldest complete frames and never exceeds capacity", () => {
     queue.pull(left, new Float32Array(3));
     assert.deepEqual([...left], Array(3).fill(2000 / 32768));
 });
+
+test("valid packet burst reaches the 9600-frame worklet cap with bounded complete-frame drops", () => {
+    const queue = new StereoPcm16Queue(9_600);
+    for (let packetIndex = 0; packetIndex < 30; packetIndex += 1) queue.push(packet(480, packetIndex, -packetIndex));
+    assert.equal(queue.queuedFrames, 9_600);
+    assert.equal(queue.maxQueuedFrames, 9_600);
+    assert.equal(queue.droppedFrames, 4_800);
+});

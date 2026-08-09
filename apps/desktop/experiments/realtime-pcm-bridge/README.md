@@ -296,3 +296,66 @@ The pure tests cover URL rejection, pre-arm rejection, exact sanitized
 payload assertion, ordinary-payload compatibility, and the actual initial
 request wrapper. Account-dependent media delivery and physical output remain
 human observations.
+
+### Hosted real-producer two-party mode
+
+`--real-producer --real-two-party` composes the hosted constraint gate and
+actual Element Web requester lifecycle above with the real process-loopback
+producer. It is still an isolated experiment: it does not change Element
+product code, Element Call, packaging, or the unresolved helper-versus-addon
+decision. R2 also remains blocked on the unexplained intermittent Electron-main
+freeze; a successful hosted run does not resolve that issue.
+
+Use all three required arguments and a dedicated profile:
+
+    apps\desktop\node_modules\.bin\electron.cmd apps\desktop\experiments\realtime-pcm-bridge\main.mjs --user-data-dir="$env:TEMP\element-real-two-party" --real-producer --real-two-party --element-url="https://YOUR-TEST-ELEMENT-WEB/"
+
+The hosted page has no preload API. The exact requesting frame must first be
+armed with the same five-field high-fidelity initial-constraint instrumentation
+used by `--two-party`; an unarmed or non-exact request is rejected before source
+enumeration or native/bridge resource creation. A separate local sandboxed
+picker receives source titles and thumbnails only in renderer memory. Main
+accepts a choice only from that picker WebContents with the exact current
+request ID and an ID from the offered source set; closing or cancelling the
+picker rejects the display request without creating a producer.
+
+At preparation time the selected source is enumerated again. A window is
+resolved from refreshed HWND to PID and captured with INCLUDE semantics. A
+screen uses the Element/Electron process tree with EXCLUDE semantics.
+`enableLocalEcho` is forced false, the proven 120 ms prebuffer and bounded
+20-packet/9,600-frame queues are unchanged, and requester, bridge, producer,
+replacement, and app-shutdown signals all stop the same main-owned controller.
+
+Every completed hosted session prints only a sanitized
+`REAL_TWO_PARTY_TEARDOWN` record. Success requires `Idle`, exactly one callback,
+and zero producer processes, MessagePorts, bridge windows, picker windows,
+capture/adapter timers, explicitly owned listeners, and session resources
+within one second. Producer release additionally requires a verified closed and
+exited child, and port release requires completed port disposal. A failed oracle
+is fatal and exits nonzero. Experiment-authored logs never include source names,
+thumbnails, hosted URLs, accounts, rooms, or tokens.
+
+After planner approval, the bounded authenticated run is exactly four cycles:
+
+1. Select one audible application window (INCLUDE), verify remotely, stop, and
+   require a passing teardown record.
+2. Select a whole screen (EXCLUDE), verify remotely, stop, and require a passing
+   teardown record.
+3. Repeat the same window INCLUDE cycle and teardown assertion.
+4. Repeat the same screen EXCLUDE cycle and teardown assertion.
+
+Do not add cycles or continue after any failed teardown. This four-cycle run is
+fidelity evidence only and must carry R2's intermittent freeze as unresolved.
+
+If the known Electron-main liveness failure naturally recurs, do not close the
+window or kill Electron/native processes. Stop normal testing, preserve the last
+durable milestone/log, identify the exact Electron main PID, and capture a full
+dump first with the installed `procdump64.exe -accepteula -ma -pt <PID>
+<ignored-diagnostics-directory>` contract. Wait for ProcDump success and verify
+the dump before cleanup, then assert no exact experiment process survives. Use
+the existing byte-preserved `run-r2-procdump-diagnostic.ps1` watchdog whenever
+the recurrence is in its diagnostic run; do not tune or rerun it blindly.
+
+Do not perform the authenticated call procedure until planner review approves
+this hosted seam. A localhost URL with no serving Element Web is useful only as
+a fail-closed startup smoke; it is not a media test.

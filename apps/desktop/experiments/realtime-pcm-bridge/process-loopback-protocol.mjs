@@ -22,14 +22,21 @@ export class ProcessLoopbackProtocolParser {
         this.failed = false;
         this.expectedSequence = 0;
         this.expectedStartFrame = 0;
+        this.bufferHighWaterBytes = 0;
+        this.rejectedBufferedBytes = 0;
     }
 
     push(chunk) {
         if (this.failed || !chunk?.length) return;
         if (this.ended) return this.#fail("trailing data after END");
         if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
-        if (this.buffer.length + chunk.length > this.maxBufferedBytes) return this.#fail("parser buffer cap exceeded");
+        const attemptedBufferedBytes = this.buffer.length + chunk.length;
+        if (attemptedBufferedBytes > this.maxBufferedBytes) {
+            this.rejectedBufferedBytes = Math.max(this.rejectedBufferedBytes, attemptedBufferedBytes);
+            return this.#fail("parser buffer cap exceeded");
+        }
         this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
+        this.bufferHighWaterBytes = Math.max(this.bufferHighWaterBytes, this.buffer.length);
         while (this.buffer.length >= PROCESS_LOOPBACK_HEADER_BYTES && !this.failed) {
             const payloadBytes = this.buffer.readUInt32LE(12);
             if (payloadBytes > MAX_PCM_PAYLOAD_BYTES) return this.#fail("payload cap exceeded");

@@ -123,3 +123,12 @@ test("enforces parser caps and JavaScript-safe counters", () => {
         assert.equal(errors.length, 1);
     }
 });
+
+test("reports accepted high-water separately from a rejected cap attempt", () => {
+    const parser = new ProcessLoopbackProtocolParser({ onError: () => {}, maxBufferedBytes: 64 });
+    parser.push(start().subarray(0, 40));
+    assert.equal(parser.bufferHighWaterBytes, 40);
+    parser.push(Buffer.alloc(25));
+    assert.equal(parser.bufferHighWaterBytes, 40);
+    assert.equal(parser.rejectedBufferedBytes, 65);
+});

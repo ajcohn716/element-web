@@ -6,6 +6,7 @@ Please see LICENSE files in the repository root for full details.
 */
 
 const status = document.querySelector("#status");
+const r2Fault = new URLSearchParams(location.search).get("r2-fault");
 
 window.addEventListener(
     "message",
@@ -16,7 +17,9 @@ window.addEventListener(
             const context = new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
             if (context.sampleRate !== 48_000)
                 throw new Error(`AudioContext sample rate is ${context.sampleRate}, expected 48000`);
-            await context.audioWorklet.addModule("./pcm-worklet.js");
+            await context.audioWorklet.addModule(
+                r2Fault === "missing-worklet" ? "./missing-worklet.js" : "./pcm-worklet.js",
+            );
             const node = new AudioWorkletNode(context, "pcm-bridge", {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
@@ -32,6 +35,8 @@ window.addEventListener(
             };
             await context.resume();
             node.port.postMessage({ type: "attach-port" }, [inputPort]);
+            if (event.data.r2Fault === "close-port")
+                setTimeout(() => node.port.postMessage({ type: "r2-close-input-port" }), 250);
             status.textContent = `AudioContext ${context.state} at ${context.sampleRate} Hz`;
             window.addEventListener("beforeunload", () => {
                 node.disconnect();

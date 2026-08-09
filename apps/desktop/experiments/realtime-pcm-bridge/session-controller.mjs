@@ -12,9 +12,10 @@ export class DisplayAudioSessionController {
     #generation = 0;
     #nextId = 1;
 
-    constructor({ prepare, onTransition = () => {}, rejectionGrant = REJECTION_GRANT }) {
+    constructor({ prepare, onTransition = () => {}, onStaleCompletion = () => {}, rejectionGrant = REJECTION_GRANT }) {
         this.prepare = prepare;
         this.onTransition = onTransition;
+        this.onStaleCompletion = onStaleCompletion;
         this.rejectionGrant = rejectionGrant;
     }
 
@@ -89,6 +90,7 @@ export class DisplayAudioSessionController {
             return false;
         }
         if (!this.#current(id, generation)) {
+            this.onStaleCompletion({ id, generation, prepared });
             if (session.resource !== prepared) await prepared?.stop?.("stale-preparation");
             return false;
         }

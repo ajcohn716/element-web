@@ -9,12 +9,25 @@ import { app, BrowserWindow, desktopCapturer, ipcMain, MessageChannelMain, sessi
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { selectExperimentMode } from "./experiment-mode.mjs";
 
-if (process.argv.includes("--real-producer")) {
+let experimentMode;
+try {
+    experimentMode = selectExperimentMode(process.argv);
+} catch (error) {
+    console.error("EXPERIMENT_CONFIGURATION_ERROR", error instanceof Error ? error.message : String(error));
+    process.exitCode = 2;
+}
+
+if (experimentMode === "r2-failures") {
+    console.error("R2_BOOT route-entry");
+    // oxlint-disable-next-line node/no-top-level-await
+    await import("./r2-failure-main.mjs");
+} else if (experimentMode === "real-producer" || experimentMode === "real-two-party") {
     console.error("REAL_BOOT route-entry");
     // oxlint-disable-next-line node/no-top-level-await
     await import("./real-producer-main.mjs");
-} else if (process.argv.includes("--two-party")) {
+} else if (experimentMode === "two-party") {
     try {
         // oxlint-disable-next-line node/no-top-level-await
         await import("./two-party-main.mjs");
@@ -26,10 +39,10 @@ if (process.argv.includes("--real-producer")) {
         // oxlint-disable-next-line node/no-process-exit
         process.exit(2);
     }
-} else if (process.argv.includes("--lifecycle")) {
+} else if (experimentMode === "lifecycle") {
     // oxlint-disable-next-line node/no-top-level-await
     await import("./lifecycle-main.mjs");
-} else {
+} else if (experimentMode === "default") {
     const experimentDirectory = path.dirname(fileURLToPath(import.meta.url));
     const SAMPLE_RATE = 48_000;
     const CHUNK_FRAMES = 480;

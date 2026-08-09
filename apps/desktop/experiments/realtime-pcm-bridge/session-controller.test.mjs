@@ -72,6 +72,24 @@ test("active teardown is idempotent", async () => {
     assert.equal(controller.state, "Idle");
 });
 
+test("preparation arms ownership monitoring before Active and callback grant", async () => {
+    const events = [];
+    const controller = new DisplayAudioSessionController({
+        prepare: async () => {
+            events.push("bridge-ready");
+            events.push("monitor-armed");
+            return { grant: { audio: "frame" }, stop: () => {} };
+        },
+        onTransition: ({ state }) => {
+            if (state === "Active") events.push("active");
+        },
+    });
+    const id = controller.begin(() => events.push("callback-granted"));
+    await controller.select(id, "source");
+    assert.deepEqual(events, ["bridge-ready", "monitor-armed", "active", "callback-granted"]);
+    await controller.stop("cleanup");
+});
+
 test("resource teardown re-entry cannot create a second stop transition", async () => {
     const transitions = [];
     const owner = {};
@@ -158,4 +176,58 @@ test("a preparing resource is centrally owned and stopped exactly once", async (
     assert.equal(await selecting, false);
     assert.equal(stops, 1);
     assert.equal(controller.state, "Idle");
+});
+
+test("stopping a preparing owner releases its barrier without starting a producer", async () => {
+    const entered = deferred();
+    const released = deferred();
+    let producers = 0;
+    let stops = 0;
+    const controller = new DisplayAudioSessionController({
+        prepare: async ({ registerResource }) => {
+            const resource = {
+                stop: () => {
+                    stops += 1;
+                    released.resolve();
+                },
+            };
+            assert.equal(registerResource(resource), true);
+            entered.resolve();
+            await released.promise;
+            if (controller.state === "Preparing") producers += 1;
+            throw new Error("preparing owner stopped");
+        },
+    });
+    const id = controller.begin(() => {});
+    const selecting = controller.select(id, "source");
+    await entered.promise;
+    await controller.stop("replaced", id);
+    assert.equal(await selecting, false);
+    assert.equal(stops, 1);
+    assert.equal(producers, 0);
+    assert.equal(controller.state, "Idle");
+});
+
+test("stale completion is counted once without callback or replacement mutation", async () => {
+    const preparation = deferred();
+    const callbacks = [0, 0];
+    const stale = [];
+    let staleStops = 0;
+    const controller = new DisplayAudioSessionController({
+        prepare: async ({ id }) =>
+            id === 1 ? preparation.promise : { grant: { audio: "replacement" }, stop: () => {} },
+        onStaleCompletion: (details) => stale.push({ id: details.id, generation: details.generation }),
+    });
+    const first = controller.begin(() => (callbacks[0] += 1));
+    const firstSelection = controller.select(first, "first");
+    const second = await controller.beginReplacing(() => (callbacks[1] += 1));
+    await controller.select(second, "second");
+    preparation.resolve({ grant: { audio: "stale" }, stop: () => (staleStops += 1) });
+    await firstSelection;
+    assert.deepEqual(stale, [{ id: first, generation: 1 }]);
+    assert.equal(staleStops, 1);
+    assert.deepEqual(callbacks, [1, 1]);
+    assert.equal(controller.active.id, second);
+    assert.equal(controller.active.resource.grant.audio, "replacement");
+    await controller.stop("cleanup");
 });
