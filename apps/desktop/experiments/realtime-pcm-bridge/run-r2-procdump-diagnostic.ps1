@@ -44,6 +44,24 @@ function Get-ProcessIdentity([int]$ProcessId) {
     }
 }
 
+function Write-DurableJson([string]$Path, [object]$Value) {
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 8))
+    $stream = [IO.FileStream]::new(
+        $Path,
+        [IO.FileMode]::Create,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read,
+        4096,
+        [IO.FileOptions]::WriteThrough
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Test-IdentityMatch([object]$Expected, [object]$Current) {
     return $null -ne $Expected -and $null -ne $Current -and
         $Expected.pid -eq $Current.pid -and $Expected.creationTimeUtc -eq $Current.creationTimeUtc -and
@@ -316,6 +334,7 @@ for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
     $stderrLog = Join-Path $runDir "electron.stderr.log"
     $markerLog = Join-Path $runDir "sync-boundaries.markers.log"
     $snapshotPath = Join-Path $runDir "freeze-process-snapshot.json"
+    $freezeRecordPath = Join-Path $runDir "watchdog-freeze.json"
     $rootMismatchPath = Join-Path $runDir "root-identity-mismatch.json"
     $manifestPath = Join-Path $runDir "manifest.json"
     $target = $null
@@ -438,6 +457,22 @@ for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
             }
         }
         $frozenSnapshot | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $snapshotPath -Encoding utf8
+        $diagnosticStage = "watchdog-freeze-record"
+        Write-DurableJson $freezeRecordPath ([ordered]@{
+            schemaVersion = 1
+            classification = "known-main-liveness-failure"
+            recordedAtUtc = [datetime]::UtcNow.ToString("o")
+            runId = $runId
+            watchdog = [ordered]@{
+                elapsedMilliseconds = $clock.ElapsedMilliseconds
+                resultSeen = $hasResult
+                lastHeartbeatCount = $lastHeartbeatCount
+                heartbeatAgeSeconds = $heartbeatAge
+            }
+            electronMain = $frozenIdentity
+            initialElectronMain = $initialIdentity
+            processSnapshot = $frozenSnapshot
+        })
         $markerLines = @(Get-Content -LiteralPath $markerLog -ErrorAction SilentlyContinue)
         $lastMarker = if ($markerLines.Count -gt 0) { $markerLines[-1] } else { $null }
         $captureResult = $null

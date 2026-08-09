@@ -565,6 +565,14 @@ class R2BridgeResource {
                 durableMarker(`adapter-${milestone}`, { sessionId: this.id, pid: details?.pid });
             },
             onFormat: (format) => {
+                durableMarker("producer-start-format", {
+                    sessionId: this.id,
+                    sampleRate: format.sampleRate,
+                    channels: format.channels,
+                    bitsPerSample: format.bitsPerSample,
+                    blockAlign: format.blockAlign,
+                    bytesPerSecond: format.bytesPerSecond,
+                });
                 recordPhase("producer-format", { sessionId: this.id });
                 this.formatReady.resolve(format);
             },
@@ -603,6 +611,7 @@ class R2BridgeResource {
     bridgeReady(details) {
         if (!this.ready) return;
         this.bridgeDetails = details;
+        durableMarker("bridge-ready", { sessionId: this.id });
         recordPhase("bridge-ready", { sessionId: this.id });
         this.ready.resolve(details);
     }
@@ -1164,7 +1173,9 @@ async function run() {
             const callbackResult = grant.video?.id === "" ? "rejected" : "granted";
             ledger.callback(id, callbackResult);
             recordPhase("display-callback", { sessionId: id, result: callbackResult });
+            durableMarker("display-callback-before", { sessionId: id, result: callbackResult });
             callback(grant);
+            durableMarker("display-callback-complete", { sessionId: id, result: callbackResult });
         };
         const id = await controller.beginReplacing(wrappedCallback, metadata);
         recordPhase("display-owner-begun", { sessionId: id });
